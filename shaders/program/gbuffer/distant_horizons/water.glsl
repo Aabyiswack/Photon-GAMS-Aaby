@@ -66,10 +66,11 @@ void main() {
         vec2(31.0 / 32.0),
         (gl_TextureMatrix[1] * gl_MultiTexCoord1).xy
     );
-tint          = gl_Color;
+	tint          = gl_Color;
     normal        = mat3(gbufferModelViewInverse) * (mat3(gl_ModelViewMatrix) * gl_Normal);
-	light_color   = texelFetch(colortex4, ivec2(191, 0), 0).rgb;
-	ambient_color = texelFetch(colortex4, ivec2(191, 1), 0).rgb;
+	int lighting_color_x = SKY_MAP_LIGHT_X;
+	light_color   = texelFetch(colortex4, ivec2(lighting_color_x, 0), 0).rgb;
+	ambient_color = texelFetch(colortex4, ivec2(lighting_color_x, 1), 0).rgb;
 
 	is_water = uint(dhMaterialId == DH_BLOCK_WATER);
 

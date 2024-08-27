@@ -28,8 +28,8 @@ float clouds_phase_single(float cos_theta) { // Single scattering phase function
 	float forwards_a = klein_nishina_phase(cos_theta, 2600.0); // this gives a nice glow very close to the sun
 	float forwards_b = henyey_greenstein_phase(cos_theta, 0.8);
 
-	return 0.8 * max(forwards_a, forwards_b)               // forwards lobe (max'ing them is completely nonsensical but it looks nice)
-	     + 0.2 * henyey_greenstein_phase(cos_theta, -0.2); // backwards lobe
+	return 1.8 * max(forwards_a, forwards_b)               // forwards lobe (max'ing them is completely nonsensical but it looks nice)
+	     + 1.2 * henyey_greenstein_phase(cos_theta, -0.2); // backwards lobe
 }
 
 float clouds_phase_multi(float cos_theta, vec3 g) { // Multiple scattering phase function
@@ -156,7 +156,7 @@ float clouds_cumulus_density(vec3 pos, vec2 detail_weights, vec2 edge_sharpening
 	// Adjust density so that the clouds are wispy at the bottom and hard at the top
 	density  = max0(density);
 	density  = 1.0 - pow(1.0 - density, mix(edge_sharpening.x, edge_sharpening.y, altitude_fraction));
-	density *= 0.5 + 0.9 * smoothstep(0.2, 0.7, altitude_fraction);
+	density *= 0.1 + 0.9 * smoothstep(0.2, 0.7, altitude_fraction);
 
 	return density;
 }
@@ -292,7 +292,7 @@ CloudsResult draw_cumulus_clouds(
 	float bounced_light      = planet_albedo * light_dir.y * rcp_pi;
 
 	float extinction_coeff   = mix(0.05, 0.1, smoothstep(0.0, 0.3, abs(sun_dir.y))) * (1.0 - 0.33 * rainStrength) * (1.0 - 0.6 * altocumulus_shadow) * CLOUDS_CUMULUS_DENSITY;
-	float scattering_coeff   = extinction_coeff * mix(1.00, 1.6, rainStrength);
+	float scattering_coeff   = extinction_coeff * mix(1.00, 0.66, rainStrength);
 
 	float dynamic_thickness  = mix(0.5, 1.0, smoothstep(0.4, 0.6, clouds_cumulus_coverage.y));
 	vec2  detail_weights     = mix(vec2(0.33, 0.40), vec2(0.25, 0.20), sqr(clouds_stratus_amount)) * CLOUDS_CUMULUS_DETAIL_STRENGTH;
@@ -623,7 +623,7 @@ CloudsResult draw_cumulus_congestus_clouds(
 	}
 
 	// Get main light color for this layer
-vec3 light_color  = sunlight_color * atmosphere_transmittance(ray_origin, light_dir);
+	vec3 light_color  = sunlight_color * atmosphere_transmittance(ray_origin, light_dir);
 		 light_color  = atmosphere_post_processing(light_color);
 	     light_color *= moonlit ? moon_color : sun_color;
 		 light_color *= 1.0 - rainStrength;
@@ -1685,7 +1685,7 @@ float render_cloud_shadow_map(vec2 uv) {
 	vec2  detail_weights     = mix(vec2(0.33, 0.40), vec2(0.25, 0.20), sqr(clouds_stratus_amount)) * CLOUDS_CUMULUS_DETAIL_STRENGTH;
 	vec2  edge_sharpening    = mix(vec2(3.0, 8.0), vec2(1.0, 2.0), clouds_stratus_amount);
 
-	extinction_coeff = 0.25 * mix(0.05, 0.1, smoothstep(0.0, 0.3, abs(sun_dir.y))) * (1.0 - 0.33 * rainStrength) * CLOUDS_CUMULUS_DENSITY;
+	extinction_coeff = mix(0.05, 0.1, smoothstep(0.0, 0.3, abs(sun_dir.y))) * (1.0 - 0.33 * rainStrength) * CLOUDS_CUMULUS_DENSITY;
 	t = intersect_sphere(ray_origin, light_dir,	clouds_cumulus_radius + 0.25 * clouds_cumulus_thickness).y;
 	pos = ray_origin + light_dir * t;
 	density = clouds_cumulus_density(pos, detail_weights, edge_sharpening, dynamic_thickness);

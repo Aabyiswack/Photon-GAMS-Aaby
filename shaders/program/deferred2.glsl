@@ -85,13 +85,8 @@ uniform vec2 view_pixel_size;
 uniform vec2 taa_offset;
 uniform vec2 clouds_offset;
 
-#ifdef DAYLIGHT_CYCLE
 uniform bool daylight_cycle_enabled;
 uniform bool world_age_changed;
-#else
-uniform bool world_age_changed_small;
-#define world_age_changed world_age_changed_small
-#endif
 
 // ------------
 //   Includes
@@ -163,7 +158,6 @@ vec3 reproject_clouds(vec2 uv, float distance_to_cloud) {
 
 	vec3 cloud_pos = world_dir * distance_to_cloud + gbufferModelViewInverse[3].xyz;
 
-#ifdef DAYLIGHT_CYCLE
 	// Work out which layer this cloud belongs to
 	vec3 velocity;
 	vec3 air_cloud_pos = vec3(0.0, CLOUDS_SCALE * (eyeAltitude - SEA_LEVEL) + planet_radius, 0.0) + CLOUDS_SCALE * cloud_pos;
@@ -178,79 +172,71 @@ vec3 reproject_clouds(vec2 uv, float distance_to_cloud) {
 	}
 
 	cloud_pos += velocity * frameTime * rcp(CLOUDS_SCALE) * float(daylight_cycle_enabled);
-#endif
 
 	return reproject_scene_space(cloud_pos, false, false);
 }
 
 void main() {
+	// --------------------
+	//   clouds upscaling
+	// --------------------
 
 	const int checkerboard_area = CLOUDS_TEMPORAL_UPSCALING * CLOUDS_TEMPORAL_UPSCALING;
 
 	ivec2 dst_texel = ivec2(gl_FragCoord.xy);
 	ivec2 src_texel = clamp(dst_texel / CLOUDS_TEMPORAL_UPSCALING, ivec2(0), ivec2(view_res * taau_render_scale) / CLOUDS_TEMPORAL_UPSCALING - 1);
 
-vec4 current            = texelFetch(colortex9, src_texel, 0);
-	float apparent_distance = texelFetch(colortex10, src_texel, 0).x;
-	float depth             = texelFetch(depthtex1, dst_texel, 0).x;
-
-	// --------------------------------
-	//   combined depth buffer for DH
-	// --------------------------------
-
-
 #ifdef DISTANT_HORIZONS
 	// Check for DH terrain
+	float depth    = texelFetch(depthtex1, dst_texel, 0).x;
 	float depth_dh = texelFetch(dhDepthTex, dst_texel, 0).x;
 	bool is_dh_terrain = is_distant_horizons_terrain(depth, depth_dh);
-	float depth_linear    = screen_to_view_space_depth(gbufferProjectionInverse, depth);
-	float depth_linear_dh = screen_to_view_space_depth(dhProjectionInverse, depth_dh);
-
-	combined_depth = is_dh_terrain
-		? view_to_screen_space_depth(combined_projection_matrix, depth_linear_dh)
-		: view_to_screen_space_depth(combined_projection_matrix, depth_linear);
-
-	if (depth >= 1.0 && !is_dh_terrain) {
-		combined_depth = 1.0;
-	}
 #else
 	const bool is_dh_terrain = false;
 #endif
 
-	// --------------------
-	//   clouds upscaling
-	// --------------------
+#if defined WORLD_OVERWORLD
+	// Fetch 3x3 neighborhood
+	vec4 a = texelFetch(colortex9, src_texel + ivec2(-1, -1), 0);
+	vec4 b = texelFetch(colortex9, src_texel + ivec2( 0, -1), 0);
+	vec4 c = texelFetch(colortex9, src_texel + ivec2( 1, -1), 0);
+	vec4 d = texelFetch(colortex9, src_texel + ivec2(-1,  0), 0);
+	vec4 e = texelFetch(colortex9, src_texel, 0);
+	vec4 f = texelFetch(colortex9, src_texel + ivec2( 1,  0), 0);
+	vec4 g = texelFetch(colortex9, src_texel + ivec2(-1,  1), 0);
+	vec4 h = texelFetch(colortex9, src_texel + ivec2( 0,  1), 0);
+	vec4 i = texelFetch(colortex9, src_texel + ivec2( 1,  1), 0);
 
-#if !defined WORLD_OVERWORLD
-	return;
-#endif
+	// Soft minimum and maximum ("Hybrid Reconstruction Antialiasing")
+	//        b         a b c
+	// (min d e f + min d e f) / 2
+	//        h         g h i
+	vec4 aabb_min  = min_of(b, d, e, f, h);
+	     aabb_min += min_of(aabb_min, a, c, g, i);
+	     aabb_min *= 0.5;
+		 aabb_min  = max0(aabb_min);
 
-#if defined TAAU
-	// Fixes issue at the top and left side of the screen with TAAU
+	vec4 aabb_max  = max_of(b, d, e, f, h);
+	     aabb_max += max_of(aabb_max, a, c, g, i);
+	     aabb_max *= 0.5;
+		 aabb_max  = max0(aabb_max);
+
+	float apparent_distance = texelFetch(colortex10, src_texel, 0).x;
+
+	// Find closest cloud distance in a 4x4 area, accross current and previous frame
+#ifdef TAAU
+	// Fix issue at the top and left side of the screen with TAAU
 	vec2 uv_clamped = clamp(uv, 0.0, 0.95);
 #else
 	#define uv_clamped uv
 #endif
 
 	float closest_distance = min(
-		apparent_distance,
+		texture_min_4x4(colortex10, uv_clamped * taau_render_scale),
 		texture_min_4x4(colortex12, uv_clamped * taau_render_scale)
 	);
 
-	// Early exit if clouds covered by terrain
-	if (depth != 1.0) {
-		float view_distance_squared = length_squared(
-			screen_to_view_space(vec3(uv, depth), true)
-		);
-		if (view_distance_squared < sqr(closest_distance)) {
-			clouds_history = current;
-			clouds_data.x = 1e6; // apparent distance
-			clouds_data.y = 0.0; // pixel age
-			return;
-		}
-	}
-
-	// Reproject clouds
+	// Reproject
 	vec2 previous_uv = reproject_clouds(uv, closest_distance).xy;
 
 #ifdef TAAU
@@ -258,25 +244,21 @@ vec4 current            = texelFetch(colortex9, src_texel, 0);
 #else
 	#define previous_uv_clamped previous_uv
 #endif
-	
-	vec4 history = catmull_rom_filter_fast(colortex11, previous_uv_clamped * taau_render_scale, 0.5);
-	vec2 history_data = texture(colortex12, previous_uv_clamped * taau_render_scale).xy;
+
+	vec4 current = e;
+	vec4 history = smooth_filter(colortex11, previous_uv_clamped * taau_render_scale);
 
 	// Depth at the previous position
 	float history_depth = 1.0 - min_of(textureGather(colortex6, previous_uv_clamped, 2));
 
 	// Get distance to terrain in the previous frame
-	float distance_to_terrain_squared = length_squared(
-		screen_to_view_space(
-			combined_projection_matrix_inverse,
-			vec3(previous_uv, history_depth),
-			true
-		)
-	);
+	vec3 screen_pos = vec3(previous_uv, history_depth);
+	vec3 view_pos = screen_to_view_space(combined_projection_matrix_inverse, screen_pos, true);
+	float distance_to_terrain = length(view_pos);
 
 	// Work out whether the history should be invalidated
 	bool disocclusion = clamp01(previous_uv) != previous_uv;
-		 disocclusion = disocclusion || (history_depth < 1.0 && distance_to_terrain_squared < sqr(closest_distance));
+		 disocclusion = disocclusion || (history_depth < 1.0 && distance_to_terrain < closest_distance);
 		 disocclusion = disocclusion || any(isnan(history));
 	     disocclusion = disocclusion || world_age_changed;
 
@@ -288,42 +270,19 @@ vec4 current            = texelFetch(colortex9, src_texel, 0);
 	float velocity_factor = 75.0 * velocity / max(sqr(closest_distance), eps);
 	      velocity_factor = velocity_factor / (velocity_factor + 1.0);
 
-	if (velocity_factor > 0.1) {
-		// Fetch 3x3 neighborhood
-		vec4 a = texelFetch(colortex9, src_texel + ivec2(-1, -1), 0);
-		vec4 b = texelFetch(colortex9, src_texel + ivec2( 0, -1), 0);
-		vec4 c = texelFetch(colortex9, src_texel + ivec2( 1, -1), 0);
-		vec4 d = texelFetch(colortex9, src_texel + ivec2(-1,  0), 0);
-		vec4 f = texelFetch(colortex9, src_texel + ivec2( 1,  0), 0);
-		vec4 g = texelFetch(colortex9, src_texel + ivec2(-1,  1), 0);
-		vec4 h = texelFetch(colortex9, src_texel + ivec2( 0,  1), 0);
-		vec4 i = texelFetch(colortex9, src_texel + ivec2( 1,  1), 0);
-		vec4 e = current;
-
-		// Soft minimum and maximum ("Hybrid Reconstruction Antialiasing")
-		//        b         a b c
-		// (min d e f + min d e f) / 2
-		//        h         g h i
-		vec4 aabb_min  = min_of(b, d, e, f, h);
-			 aabb_min += min_of(aabb_min, a, c, g, i);
-			 aabb_min *= 0.5;
-			 aabb_min  = max0(aabb_min);
-
-		vec4 aabb_max  = max_of(b, d, e, f, h);
-			 aabb_max += max_of(aabb_max, a, c, g, i);
-			 aabb_max *= 0.5;
-			 aabb_max  = max0(aabb_max);
-
-		history = mix(
-			history,
-			clamp(history, aabb_min, aabb_max),
-			velocity_factor
-		);
-	}
+	history = mix(
+		history,
+		clamp(history, aabb_min, aabb_max),
+		velocity_factor
+	);
 
 	// Get previous pixel age and apparent distance
+	vec2 history_data = texture(colortex12, previous_uv_clamped * taau_render_scale).xy;
 	float apparent_distance_history = history_data.x;
 	      apparent_distance_history = disocclusion ? apparent_distance : apparent_distance_history;
+
+	// Reset pixel age on disocclusion
+	float pixel_age = max0(history_data.y) * float(!disocclusion);
 
 	// Checkerboard upscaling
 	ivec2 offset_0 = dst_texel % CLOUDS_TEMPORAL_UPSCALING;
@@ -333,12 +292,15 @@ vec4 current            = texelFetch(colortex9, src_texel, 0);
 		apparent_distance = min(apparent_distance, apparent_distance_history);
 	}
 
-	float pixel_age = max0(history_data.y) * float(!disocclusion);
-	float history_weight = 1.0 - rcp(max(pixel_age - checkerboard_area, 1.0));
+	// Reduce history weight when player is moving quickly
+	float movement_rejection = exp(-16.0 * length(cameraPosition - previousCameraPosition));
+	pixel_age *= movement_rejection * 0.07 + 0.93;
 
+	float history_weight  = 1.0 - rcp(max(pixel_age - checkerboard_area, 1.0));
+	      history_weight *= mix(1.0, movement_rejection, history_weight);
 
-#ifndef TAAU
 	// Offcenter rejection
+#ifndef TAAU
 	vec2 pixel_center_offset = 1.0 - abs(fract(previous_uv * view_res) * 2.0 - 1.0);
 	float offcenter_rejection = sqrt(pixel_center_offset.x * pixel_center_offset.y);
           offcenter_rejection = mix(1.0, offcenter_rejection, history_weight);
@@ -349,6 +311,24 @@ vec4 current            = texelFetch(colortex9, src_texel, 0);
 	clouds_history = max0(mix(current, history, history_weight));
 	clouds_data.x = mix(apparent_distance, apparent_distance_history, history_weight);
 	clouds_data.y = min(++pixel_age, CLOUDS_ACCUMULATION_LIMIT);
+#endif
+
+	// --------------------------------
+	//   combined depth buffer for DH
+	// --------------------------------
+
+#ifdef DISTANT_HORIZONS
+	float depth_linear    = screen_to_view_space_depth(gbufferProjectionInverse, depth);
+	float depth_linear_dh = screen_to_view_space_depth(dhProjectionInverse, depth_dh);
+
+	combined_depth = is_dh_terrain
+		? view_to_screen_space_depth(combined_projection_matrix, depth_linear_dh)
+		: view_to_screen_space_depth(combined_projection_matrix, depth_linear);
+
+	if (depth >= 1.0 && !is_dh_terrain) {
+		combined_depth = 1.0;
+	}
+#endif
 }
 
 #endif
